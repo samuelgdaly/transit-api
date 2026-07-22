@@ -76,12 +76,14 @@ export async function ensureZip(agency) {
       await downloadZip(agency.gtfsStaticUrl, zipPath);
       writeFileSync(metaPath, JSON.stringify({ downloadedAt: Date.now(), url: agency.gtfsStaticUrl }));
       // Invalidate per-route shape caches when the zip refreshes.
-      for (const name of ["route-shapes", "route-shapes-v2"]) {
-        const shapeCacheDir = join(dir, name);
-        if (existsSync(shapeCacheDir)) rmSync(shapeCacheDir, { recursive: true, force: true });
+      for (const name of ["route-shapes", "route-shapes-v2", "route-stops-v1"]) {
+        const cacheDir = join(dir, name);
+        if (existsSync(cacheDir)) rmSync(cacheDir, { recursive: true, force: true });
       }
-      const shapesExtract = join(dir, "shapes.txt");
-      if (existsSync(shapesExtract)) rmSync(shapesExtract, { force: true });
+      for (const name of ["shapes.txt", "stop_times.txt"]) {
+        const extract = join(dir, name);
+        if (existsSync(extract)) rmSync(extract, { force: true });
+      }
       // Drop in-memory indexes built from the previous zip.
       cacheDelete(`routes:${agency.slug}`);
       cacheDelete(`static:${agency.slug}`);
@@ -150,6 +152,11 @@ function buildCoreIndex(agency, zipPath) {
   const neededShapeIds = new Set();
   /** @type {Map<string, string>} */
   const stopNames = new Map();
+  /** @type {Map<string, { id: string, name: string, lat: number, lon: number, parentStation: string|null, locationType: string }>} */
+  const stops = new Map();
+  /** parent_station → child stop_ids (for arrivals matching). */
+  /** @type {Map<string, string[]>} */
+  const childrenByParent = new Map();
 
   const stopsText = readZipText(zip, "stops.txt");
   if (stopsText) {
@@ -158,6 +165,19 @@ function buildCoreIndex(agency, zipPath) {
       if (!id) continue;
       const name = String(s.stop_name || "").trim();
       if (name) stopNames.set(id, name);
+      const lat = Number(s.stop_lat);
+      const lon = Number(s.stop_lon);
+      const locationType = String(s.location_type ?? "").trim();
+      const parentStation = String(s.parent_station || "").trim() || null;
+      // Boarding stops/platforms (0/blank) and boarding areas (4); skip entrances/nodes.
+      const boardable = locationType === "" || locationType === "0" || locationType === "4";
+      if (boardable && Number.isFinite(lat) && Number.isFinite(lon)) {
+        stops.set(id, { id, name: name || id, lat, lon, parentStation, locationType: locationType || "0" });
+      }
+      if (parentStation) {
+        if (!childrenByParent.has(parentStation)) childrenByParent.set(parentStation, []);
+        childrenByParent.get(parentStation).push(id);
+      }
     }
   }
 
@@ -197,7 +217,10 @@ function buildCoreIndex(agency, zipPath) {
     tripToRoute,
     tripDetails,
     stopNames,
+    stops,
+    childrenByParent,
     routeShapes: {},
+    routeStops: {},
     shapesReady: false,
     _zipPath: zipPath,
     _routeToShapeIds: routeToShapeIds,
@@ -206,6 +229,7 @@ function buildCoreIndex(agency, zipPath) {
       routeCount: routes.length,
       tripCount: tripToRoute.size,
       stopCount: stopNames.size,
+      boardableStopCount: stops.size,
       shapeRouteCount: 0,
       shapeFeatureCount: 0,
     },
@@ -398,4 +422,149 @@ export async function ensureRouteShapes(staticIndex) {
   await loadShapesForRouteIds(staticIndex, allIds);
   staticIndex.shapesReady = true;
   return staticIndex;
+}
+
+/** Extract stop_times.txt once for streaming. */
+function ensureStopTimesTxt(staticIndex) {
+  const outPath = join(agencyDataDir(staticIndex), "stop_times.txt");
+  if (existsSync(outPath) && statSync(outPath).size > 0) return outPath;
+  const zip = new AdmZip(staticIndex._zipPath);
+  const entry = findZipEntry(zip, "stop_times.txt");
+  if (!entry) return null;
+  mkdirSync(dirname(outPath), { recursive: true });
+  writeFileSync(outPath, entry.getData());
+  return outPath;
+}
+
+function routeStopsCachePath(staticIndex, routeId) {
+  return join(agencyDataDir(staticIndex), "route-stops-v1", `${encodeURIComponent(routeId)}.json`);
+}
+
+function readDiskRouteStops(staticIndex, routeId) {
+  const path = routeStopsCachePath(staticIndex, routeId);
+  if (!existsSync(path)) return null;
+  try {
+    return JSON.parse(readFileSync(path, "utf8"));
+  } catch {
+    return null;
+  }
+}
+
+function writeDiskRouteStops(staticIndex, routeId, stopIds) {
+  const path = routeStopsCachePath(staticIndex, routeId);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, JSON.stringify(stopIds));
+}
+
+/**
+ * Stream stop_times.txt and collect stop_ids only for the given route IDs.
+ */
+async function collectStopIdsByRoute(stopTimesPath, tripToRoute, wantedRouteIds) {
+  /** @type {Map<string, Set<string>>} */
+  const byRoute = new Map();
+  for (const id of wantedRouteIds) byRoute.set(id, new Set());
+  if (!wantedRouteIds.size || !stopTimesPath) return byRoute;
+
+  const rl = createInterface({
+    input: createReadStream(stopTimesPath, { encoding: "utf8" }),
+    crlfDelay: Infinity,
+  });
+
+  let iTrip = -1;
+  let iStop = -1;
+  let headerDone = false;
+
+  for await (const raw of rl) {
+    const line = raw.trim();
+    if (!line) continue;
+    const cols = line.split(",");
+    if (!headerDone) {
+      const header = cols.map((c) => c.trim().replace(/^\uFEFF/, "").toLowerCase());
+      iTrip = header.indexOf("trip_id");
+      iStop = header.indexOf("stop_id");
+      headerDone = true;
+      if (iTrip < 0 || iStop < 0) break;
+      continue;
+    }
+    const tripId = cols[iTrip];
+    const routeId = tripToRoute.get(tripId);
+    if (!routeId || !wantedRouteIds.has(routeId)) continue;
+    const stopId = cols[iStop];
+    if (!stopId) continue;
+    byRoute.get(routeId).add(stopId);
+  }
+
+  return byRoute;
+}
+
+/**
+ * Load boardable stops for specific route IDs (memory + disk cache).
+ * Returns merged list with routeIds on each stop.
+ */
+export async function loadStopsForRouteIds(staticIndex, routeIds) {
+  const ids = [...new Set(routeIds.map(String))];
+  if (!staticIndex.routeStops) staticIndex.routeStops = {};
+
+  const hydrate = () => {
+    const missing = [];
+    for (const routeId of ids) {
+      if (staticIndex.routeStops[routeId]) continue;
+      const fromDisk = readDiskRouteStops(staticIndex, routeId);
+      if (fromDisk) {
+        staticIndex.routeStops[routeId] = fromDisk;
+        continue;
+      }
+      missing.push(routeId);
+    }
+    return missing;
+  };
+
+  let missing = hydrate();
+  while (missing.length) {
+    if (staticIndex._stopScan) {
+      await staticIndex._stopScan;
+      missing = hydrate();
+      continue;
+    }
+
+    const batch = missing;
+    staticIndex._stopScan = (async () => {
+      const stopTimesPath = ensureStopTimesTxt(staticIndex);
+      const wanted = new Set(batch);
+      const byRoute = await collectStopIdsByRoute(stopTimesPath, staticIndex.tripToRoute, wanted);
+      for (const routeId of batch) {
+        const stopIds = [...(byRoute.get(routeId) || [])];
+        staticIndex.routeStops[routeId] = stopIds;
+        writeDiskRouteStops(staticIndex, routeId, stopIds);
+      }
+    })().finally(() => {
+      staticIndex._stopScan = null;
+    });
+
+    await staticIndex._stopScan;
+    missing = hydrate();
+  }
+
+  /** @type {Map<string, { id: string, name: string, lat: number, lon: number, routeIds: string[] }>} */
+  const merged = new Map();
+  const stops = staticIndex.stops || new Map();
+
+  for (const routeId of ids) {
+    const stopIds = staticIndex.routeStops[routeId] || [];
+    for (const stopId of stopIds) {
+      const s = stops.get(stopId);
+      if (!s) continue;
+      let row = merged.get(stopId);
+      if (!row) {
+        row = { id: s.id, name: s.name, lat: s.lat, lon: s.lon, routeIds: [] };
+        merged.set(stopId, row);
+      }
+      if (!row.routeIds.includes(routeId)) row.routeIds.push(routeId);
+    }
+  }
+
+  return {
+    agency: staticIndex.agencySlug,
+    stops: [...merged.values()].sort((a, b) => a.name.localeCompare(b.name, undefined, { sensitivity: "base" })),
+  };
 }

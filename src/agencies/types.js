@@ -22,6 +22,7 @@
  * @property {string} slug
  * @property {string} [notes]
  * @property {(agency: AgencyConfig, apiKey: string|null) => string} buildVehicleFeedUrl
+ * @property {(agency: AgencyConfig, apiKey: string|null) => string} [buildTripUpdateFeedUrl]
  * @property {(agency: AgencyConfig, apiKey: string|null) => Record<string, string>} [buildVehicleFeedHeaders]
  * @property {(id: string|null|undefined) => string} normalizeRouteId
  * @property {(entity: object, staticIndex: { tripToRoute: Map<string,string>, routeIds: Set<string> }) => { routeId: string|null, method: string }} extractRouteId

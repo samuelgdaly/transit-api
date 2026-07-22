@@ -84,6 +84,13 @@ export async function loadAgencies({ force = false } = {}) {
   let agencies = rows.map(rowToAgency).filter(Boolean);
   agencies = await Promise.all(agencies.map((a) => enrichAgencyFromMobilityDb(a)));
   agencies = agencies.filter((a) => a.gtfsStaticUrl);
+  // 511 TripUpdates URL if Sheet cell is blank (same key/agency as vehicles).
+  agencies = agencies.map((a) => {
+    if (a.slug === "muni" && !a.tripUpdatesUrl) {
+      return { ...a, tripUpdatesUrl: "https://api.511.org/transit/tripupdates" };
+    }
+    return a;
+  });
   if (!agencies.length) throw new Error("Sheet has no valid agency rows");
 
   cache = { at: now, agencies };
@@ -99,6 +106,7 @@ export function publicAgency(agency) {
     lon: agency.lon,
     spanDelta: agency.spanDelta,
     fareLink: agency.fareLink,
+    hasTripUpdates: Boolean(agency.tripUpdatesUrl && /^https?:\/\//i.test(agency.tripUpdatesUrl)),
   };
 }
 

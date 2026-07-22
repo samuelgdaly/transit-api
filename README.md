@@ -13,7 +13,9 @@ Cloud Run JSON API for the `/transit` map (and future iOS).
 | `GET /agencies` | Cities from the Sheet (`?refresh=1` re-reads the Sheet now) |
 | `GET /routes/:agency` | Sidebar routes (routes.txt only — fast) |
 | `GET /shapes/:agency?routes=` | GeoJSON — all shape patterns for each requested route (lazy) |
+| `GET /stops/:agency?routes=` | Boardable stops for selected routes (lazy via stop_times stream) |
 | `GET /vehicles/:agency?routes=` | Live vehicles (~30s cache); includes status/stop/occupancy when the feed sends them |
+| `GET /arrivals/:agency/:stopId` | Real-time arrivals from TripUpdates (`realtime: false` if no TU URL) |
 | `GET /health` | Liveness |
 
 ## Add a city

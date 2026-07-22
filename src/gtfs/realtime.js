@@ -60,6 +60,49 @@ export async function getVehicleFeed(agency) {
   });
 }
 
+/**
+ * Fetch + decode trip updates (cached ~30s). Returns null if no URL configured.
+ */
+export async function getTripUpdateFeed(agency) {
+  if (!agency.tripUpdatesUrl) return null;
+  return cached(`tripupdates:${agency.slug}`, 30_000, async () => {
+    const adapter = getAdapter(agency.slug);
+    const apiKey = await getAgencyApiKey(agency);
+    const buildUrl =
+      typeof adapter.buildTripUpdateFeedUrl === "function"
+        ? adapter.buildTripUpdateFeedUrl.bind(adapter)
+        : defaultAdapterBuildTripUpdate;
+    const url = buildUrl(agency, apiKey);
+    const headers = {
+      "User-Agent": "transit-api/1.0",
+      Accept: "application/x-protobuf, application/octet-stream, */*",
+      ...(typeof adapter.buildVehicleFeedHeaders === "function"
+        ? adapter.buildVehicleFeedHeaders(agency, apiKey)
+        : {}),
+    };
+    const res = await fetch(url, {
+      headers,
+      signal: AbortSignal.timeout(30000),
+    });
+    if (!res.ok) {
+      const body = await res.text().catch(() => "");
+      throw new Error(`TripUpdates ${res.status} for ${agency.slug}: ${body.slice(0, 200)}`);
+    }
+    const buffer = Buffer.from(await res.arrayBuffer());
+    const feed = FeedMessage.decode(buffer);
+    return { feed, fetchedAt: new Date().toISOString(), url: redactFeedUrl(url) };
+  });
+}
+
+function defaultAdapterBuildTripUpdate(agency, apiKey) {
+  const url = new URL(agency.tripUpdatesUrl);
+  if (apiKey && !url.searchParams.has("api_key") && !url.searchParams.has("apiKey")) {
+    url.searchParams.set("api_key", apiKey);
+  }
+  if (agency.rtAgencyCode) url.searchParams.set("agency", agency.rtAgencyCode);
+  return url.toString();
+}
+
 function toUnixSeconds(value) {
   if (value == null || value === "") return null;
   if (typeof value === "number" && Number.isFinite(value)) return value;
@@ -218,5 +261,99 @@ export function filterVehicles(agency, feedBundle, staticIndex, routeFilter) {
     vehicles,
     fetchedAt: feedBundle.fetchedAt,
     vehicleCount: vehicles.length,
+  };
+}
+
+/**
+ * Build matching stop_id set for a click: the stop itself, children if parent,
+ * and parent if this stop is a child (feeds vary).
+ */
+function expandStopIds(stopId, staticIndex) {
+  const ids = new Set([String(stopId)]);
+  const children = staticIndex.childrenByParent?.get(stopId);
+  if (children) for (const c of children) ids.add(c);
+  const stop = staticIndex.stops?.get(stopId);
+  if (stop?.parentStation) {
+    ids.add(stop.parentStation);
+    const siblings = staticIndex.childrenByParent?.get(stop.parentStation);
+    if (siblings) for (const c of siblings) ids.add(c);
+  }
+  return ids;
+}
+
+/**
+ * Real-time arrivals at a stop from GTFS-RT TripUpdates.
+ */
+export function filterArrivals(agency, feedBundle, staticIndex, stopId, routeFilter) {
+  const adapter = getAdapter(agency.slug);
+  const wantedStops = expandStopIds(stopId, staticIndex);
+  const wantedRoutes = routeFilter?.size ? routeFilter : null;
+  const now = Math.floor(Date.now() / 1000);
+  const arrivals = [];
+
+  for (const entity of feedBundle.feed.entity || []) {
+    const tu = entity.tripUpdate;
+    if (!tu) continue;
+    const trip = tu.trip || {};
+    const tripId = trip.tripId ? String(trip.tripId) : null;
+    const { routeId } = adapter.extractRouteId(entity, staticIndex);
+    if (!routeId) continue;
+    const normalized = adapter.normalizeRouteId(routeId);
+    if (wantedRoutes && !wantedRoutes.has(normalized)) continue;
+
+    const details = lookupTripDetails(tripId, trip, staticIndex);
+
+    for (const stu of tu.stopTimeUpdate || []) {
+      const sid = stu.stopId ? String(stu.stopId) : null;
+      if (!sid || !wantedStops.has(sid)) continue;
+
+      const arrivalTime = toUnixSeconds(stu.arrival?.time);
+      const departureTime = toUnixSeconds(stu.departure?.time);
+      const when = arrivalTime ?? departureTime;
+      // Drop predictions more than ~1 minute in the past.
+      if (when != null && when < now - 60) continue;
+
+      let delay = null;
+      if (stu.arrival?.delay != null && Number.isFinite(Number(stu.arrival.delay))) {
+        delay = Number(stu.arrival.delay);
+      } else if (stu.departure?.delay != null && Number.isFinite(Number(stu.departure.delay))) {
+        delay = Number(stu.departure.delay);
+      }
+
+      arrivals.push({
+        routeId: normalized,
+        tripId,
+        headsign: details?.headsign || null,
+        stopId: sid,
+        arrivalTime,
+        departureTime,
+        delay,
+        scheduleRelationship: enumLabel(stu.scheduleRelationship, {
+          0: "SCHEDULED",
+          1: "SKIPPED",
+          2: "NO_DATA",
+          3: "UNSCHEDULED",
+        }),
+      });
+    }
+  }
+
+  arrivals.sort((a, b) => {
+    const ta = a.arrivalTime ?? a.departureTime ?? Number.POSITIVE_INFINITY;
+    const tb = b.arrivalTime ?? b.departureTime ?? Number.POSITIVE_INFINITY;
+    return ta - tb;
+  });
+
+  const stop = staticIndex.stops?.get(stopId);
+  const stopName =
+    stop?.name || staticIndex.stopNames?.get(stopId) || null;
+
+  return {
+    agency: agency.slug,
+    stopId: String(stopId),
+    stopName,
+    fetchedAt: feedBundle.fetchedAt,
+    realtime: true,
+    arrivals,
   };
 }

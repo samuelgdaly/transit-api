@@ -18,6 +18,20 @@ export const defaultAdapter = {
     return url.toString();
   },
 
+  buildTripUpdateFeedUrl(agency, apiKey) {
+    if (!agency.tripUpdatesUrl) {
+      throw new Error(`${agency.slug || "agency"}: tripUpdatesUrl missing from sheet`);
+    }
+    const url = new URL(agency.tripUpdatesUrl);
+    if (apiKey && !url.searchParams.has("api_key") && !url.searchParams.has("apiKey")) {
+      url.searchParams.set("api_key", apiKey);
+    }
+    if (agency.rtAgencyCode) {
+      url.searchParams.set("agency", agency.rtAgencyCode);
+    }
+    return url.toString();
+  },
+
   normalizeRouteId(id) {
     return String(id ?? "").trim();
   },
