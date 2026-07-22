@@ -152,8 +152,11 @@ function buildCoreIndex(agency, zipPath) {
   const neededShapeIds = new Set();
   /** @type {Map<string, string>} */
   const stopNames = new Map();
-  /** @type {Map<string, { id: string, name: string, lat: number, lon: number, parentStation: string|null, locationType: string }>} */
+  /** @type {Map<string, { id: string, name: string, lat: number, lon: number, parentStation: string|null, locationType: string, code: string|null }>} */
   const stops = new Map();
+  /** stop_code → stop_id (511 RT often puts stop_code in GTFS-RT stopId). */
+  /** @type {Map<string, string>} */
+  const stopCodeToId = new Map();
   /** parent_station → child stop_ids (for arrivals matching). */
   /** @type {Map<string, string[]>} */
   const childrenByParent = new Map();
@@ -165,6 +168,11 @@ function buildCoreIndex(agency, zipPath) {
       if (!id) continue;
       const name = String(s.stop_name || "").trim();
       if (name) stopNames.set(id, name);
+      const code = String(s.stop_code || "").trim() || null;
+      if (code) {
+        stopCodeToId.set(code, id);
+        if (name) stopNames.set(code, name);
+      }
       const lat = Number(s.stop_lat);
       const lon = Number(s.stop_lon);
       const locationType = String(s.location_type ?? "").trim();
@@ -172,7 +180,15 @@ function buildCoreIndex(agency, zipPath) {
       // Boarding stops/platforms (0/blank) and boarding areas (4); skip entrances/nodes.
       const boardable = locationType === "" || locationType === "0" || locationType === "4";
       if (boardable && Number.isFinite(lat) && Number.isFinite(lon)) {
-        stops.set(id, { id, name: name || id, lat, lon, parentStation, locationType: locationType || "0" });
+        stops.set(id, {
+          id,
+          name: name || id,
+          lat,
+          lon,
+          parentStation,
+          locationType: locationType || "0",
+          code,
+        });
       }
       if (parentStation) {
         if (!childrenByParent.has(parentStation)) childrenByParent.set(parentStation, []);
@@ -218,6 +234,7 @@ function buildCoreIndex(agency, zipPath) {
     tripDetails,
     stopNames,
     stops,
+    stopCodeToId,
     childrenByParent,
     routeShapes: {},
     routeStops: {},

@@ -265,18 +265,39 @@ export function filterVehicles(agency, feedBundle, staticIndex, routeFilter) {
 }
 
 /**
- * Build matching stop_id set for a click: the stop itself, children if parent,
- * and parent if this stop is a child (feeds vary).
+ * Build matching stop_id set for a click: the stop itself, its stop_code
+ * (511 puts codes in RT stopId), children if parent, and siblings.
  */
 function expandStopIds(stopId, staticIndex) {
-  const ids = new Set([String(stopId)]);
+  const ids = new Set();
+  const add = (raw) => {
+    if (raw == null || raw === "") return;
+    const id = String(raw);
+    ids.add(id);
+    const stop = staticIndex.stops?.get(id);
+    if (stop?.code) ids.add(String(stop.code));
+    const viaCode = staticIndex.stopCodeToId?.get(id);
+    if (viaCode) {
+      ids.add(viaCode);
+      const mapped = staticIndex.stops?.get(viaCode);
+      if (mapped?.code) ids.add(String(mapped.code));
+    }
+  };
+
+  add(stopId);
   const children = staticIndex.childrenByParent?.get(stopId);
-  if (children) for (const c of children) ids.add(c);
-  const stop = staticIndex.stops?.get(stopId);
+  if (children) for (const c of children) add(c);
+  const stop = staticIndex.stops?.get(stopId) || staticIndex.stops?.get(staticIndex.stopCodeToId?.get(stopId));
   if (stop?.parentStation) {
-    ids.add(stop.parentStation);
+    add(stop.parentStation);
     const siblings = staticIndex.childrenByParent?.get(stop.parentStation);
-    if (siblings) for (const c of siblings) ids.add(c);
+    if (siblings) for (const c of siblings) add(c);
+  }
+  // Same-name opposite-direction platforms (e.g. California St & 4th Ave 3822/3823).
+  if (stop?.name && staticIndex.stops) {
+    for (const other of staticIndex.stops.values()) {
+      if (other.name === stop.name) add(other.id);
+    }
   }
   return ids;
 }
