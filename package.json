@@ -1,0 +1,25 @@
+{
+  "name": "transit-api",
+  "version": "1.0.0",
+  "description": "",
+  "main": "src/index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1",
+    "start": "node src/index.js",
+    "check": "node scripts/check-agency.mjs",
+    "mdb": "node scripts/mdb-propose.mjs",
+    "deploy": "bash scripts/deploy.sh"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "module",
+  "dependencies": {
+    "@google-cloud/secret-manager": "^6.3.0",
+    "adm-zip": "^0.6.0",
+    "cors": "^2.8.6",
+    "csv-parse": "^7.0.1",
+    "express": "^5.2.1",
+    "gtfs-realtime-bindings": "^2.1.0"
+  }
+}

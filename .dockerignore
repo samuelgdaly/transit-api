@@ -1,0 +1,10 @@
+node_modules/
+npm-debug.log
+data/
+.env
+.env.*
+!.env.example
+*.log
+.DS_Store
+docs/transitland-usa-operators.csv
+docs/transitland-usa-open-vp.csv
