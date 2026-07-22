@@ -265,8 +265,10 @@ export function filterVehicles(agency, feedBundle, staticIndex, routeFilter) {
 }
 
 /**
- * Build matching stop_id set for a click: the stop itself, its stop_code
- * (511 puts codes in RT stopId), children if parent, and siblings.
+ * IDs that match a clicked stop in TripUpdates.
+ * Keep this minimal: the stop_id, its stop_code (511 uses codes in RT),
+ * and GTFS parent/child links when present. Opposite directions are separate
+ * stops — click the other dot for the other way.
  */
 function expandStopIds(stopId, staticIndex) {
   const ids = new Set();
@@ -287,17 +289,13 @@ function expandStopIds(stopId, staticIndex) {
   add(stopId);
   const children = staticIndex.childrenByParent?.get(stopId);
   if (children) for (const c of children) add(c);
-  const stop = staticIndex.stops?.get(stopId) || staticIndex.stops?.get(staticIndex.stopCodeToId?.get(stopId));
+  const stop =
+    staticIndex.stops?.get(stopId) ||
+    staticIndex.stops?.get(staticIndex.stopCodeToId?.get(String(stopId)));
   if (stop?.parentStation) {
     add(stop.parentStation);
     const siblings = staticIndex.childrenByParent?.get(stop.parentStation);
     if (siblings) for (const c of siblings) add(c);
-  }
-  // Same-name opposite-direction platforms (e.g. California St & 4th Ave 3822/3823).
-  if (stop?.name && staticIndex.stops) {
-    for (const other of staticIndex.stops.values()) {
-      if (other.name === stop.name) add(other.id);
-    }
   }
   return ids;
 }
